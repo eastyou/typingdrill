@@ -1,0 +1,295 @@
+"""生成单文件、可离线使用的打字练习页面。"""
+
+from __future__ import annotations
+
+import html
+import json
+
+from .model import Lesson, TypingError, validate_minutes
+
+
+def _safe_json(text: str) -> str:
+    """嵌入 script 的 JSON，避免 </script> 提前闭合标签。"""
+
+    return json.dumps(text, ensure_ascii=True).replace("</", "<\\/")
+
+
+def render_drill(
+    lesson: Lesson,
+    minutes: int = 3,
+    title: str = "英文打字练习",
+) -> str:
+    """把一个课程渲染成单文件 HTML，包含计时、实时高亮与成绩统计。"""
+
+    if not isinstance(lesson, Lesson):
+        raise TypingError("lesson 必须是 Lesson")
+    minutes = validate_minutes(minutes)
+    safe_title = html.escape(title)
+    safe_name = html.escape(lesson.name)
+    safe_description = html.escape(lesson.description)
+    target = _safe_json(lesson.text)
+    duration = minutes * 60
+
+    return """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>%s</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #171e26; --panel-2: #1f2832;
+    --text: #e6edf3; --muted: #8b98a5; --line: #2a3542;
+    --ok: #4ade80; --bad: #f87171; --accent: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%%; }
+  body { margin: 0; background: radial-gradient(circle at 20%% 0%%, #1b2632 0%%, var(--bg) 55%%);
+         color: var(--text); font-family: "Noto Sans SC", "PingFang SC",
+         "Microsoft YaHei", sans-serif; min-height: 100%%; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 28px 20px 40px; }
+  header { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end;
+           justify-content: space-between; margin-bottom: 18px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: .5px; }
+  .sub { margin: 0; color: var(--muted); font-size: 13px; }
+  .stats { display: flex; gap: 10px; flex-wrap: wrap; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+          padding: 8px 14px; min-width: 86px; text-align: center; }
+  .stat span { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  .stat b { font-size: 20px; font-variant-numeric: tabular-nums; }
+  .stage { position: relative; background: var(--panel); border: 1px solid var(--line);
+           border-radius: 12px; padding: 22px 24px 18px; cursor: text; }
+  .stage:focus-within { border-color: #3d4e60; box-shadow: 0 0 0 3px rgba(251,191,36,.08); }
+  .text { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+          font-size: 20px; line-height: 1.95; letter-spacing: .4px;
+          white-space: pre-wrap; word-break: break-word; min-height: 120px;
+          user-select: none; }
+  .ch { border-radius: 2px; }
+  .ch.ok { color: var(--ok); }
+  .ch.bad { color: #fff; background: rgba(248,113,113,.55); }
+  .ch.current { border-bottom: 2px solid var(--accent); animation: blink 1s steps(1) infinite; }
+  .ch.newline { color: #4a5a6a; }
+  @keyframes blink { 50%% { border-bottom-color: transparent; } }
+  #input { position: absolute; width: 1px; height: 1px; opacity: 0;
+           border: 0; padding: 0; margin: 0; resize: none; pointer-events: none; }
+  .hint { color: var(--muted); font-size: 12px; margin: 10px 0 0; }
+  .result { margin-top: 16px; background: var(--panel-2); border: 1px solid var(--line);
+            border-radius: 8px; padding: 14px 16px; }
+  .result strong { color: var(--accent); }
+  .result p { margin: 6px 0 0; font-size: 14px; color: var(--text); }
+  footer { display: flex; align-items: center; gap: 14px; margin-top: 16px;
+           color: var(--muted); font-size: 12px; }
+  button { background: var(--accent); color: #241a00; border: 0; border-radius: 8px;
+           padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  button:hover { filter: brightness(1.08); }
+  button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+  @media (max-width: 640px) {
+    .text { font-size: 17px; line-height: 1.8; }
+    .stat { min-width: 72px; padding: 6px 10px; }
+    .stat b { font-size: 17px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ch.current { animation: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>%s</h1>
+      <p class="sub">课程：%s · %s · 共 %d 个字符</p>
+    </div>
+    <div class="stats">
+      <div class="stat"><span>速度 WPM</span><b id="wpm">0</b></div>
+      <div class="stat"><span>正确率</span><b id="acc">100%%</b></div>
+      <div class="stat"><span>进度</span><b id="progress">0%%</b></div>
+      <div class="stat"><span>剩余时间</span><b id="time">--:--</b></div>
+    </div>
+  </header>
+  <main class="stage" id="stage">
+    <div class="text" id="text" aria-label="练习文本"></div>
+    <textarea id="input" autocomplete="off" autocapitalize="off" autocorrect="off"
+      spellcheck="false" aria-label="输入区" autofocus></textarea>
+    <p class="hint">点击文本区后直接输入；换行请按 Enter，打错会标红，可继续往后打。</p>
+    <div class="result" id="result" hidden>
+      <strong>本轮结束</strong>
+      <p id="result-text"></p>
+    </div>
+  </main>
+  <footer>
+    <button id="restart" type="button">重新开始</button>
+    <span>限时 %d 分钟 · 单文件离线运行</span>
+  </footer>
+</div>
+<script>
+(function () {
+  "use strict";
+  var TARGET = %s;
+  var DURATION = %d;
+  var textEl = document.getElementById("text");
+  var inputEl = document.getElementById("input");
+  var stageEl = document.getElementById("stage");
+  var wpmEl = document.getElementById("wpm");
+  var accEl = document.getElementById("acc");
+  var progressEl = document.getElementById("progress");
+  var timeEl = document.getElementById("time");
+  var resultEl = document.getElementById("result");
+  var resultText = document.getElementById("result-text");
+  var restartBtn = document.getElementById("restart");
+  var spans = [];
+  var started = false;
+  var finished = false;
+  var startTime = 0;
+  var timer = null;
+
+  function fmt(seconds) {
+    var total = Math.max(0, Math.ceil(seconds));
+    var minutes = Math.floor(total / 60);
+    var rest = total %% 60;
+    return minutes + ":" + (rest < 10 ? "0" : "") + rest;
+  }
+
+  function elapsed() {
+    return started ? (Date.now() - startTime) / 1000 : 0;
+  }
+
+  function stats(value) {
+    var limit = Math.min(value.length, TARGET.length);
+    var correct = 0;
+    var index;
+    for (index = 0; index < limit; index += 1) {
+      if (value.charAt(index) === TARGET.charAt(index)) {
+        correct += 1;
+      }
+    }
+    var seconds = elapsed();
+    var speed = seconds > 0 ? (correct / 5) / (seconds / 60) : 0;
+    var acc = value.length > 0 ? (correct / value.length) * 100 : 100;
+    return { correct: correct, speed: speed, accuracy: acc, limit: limit };
+  }
+
+  function paint(value) {
+    var limit = Math.min(value.length, TARGET.length);
+    var index;
+    for (index = 0; index < spans.length; index += 1) {
+      var span = spans[index];
+      span.className = TARGET.charAt(index) === "\\n" ? "ch newline" : "ch";
+      if (index < limit) {
+        span.className += value.charAt(index) === TARGET.charAt(index) ? " ok" : " bad";
+      } else if (index === limit) {
+        span.className += " current";
+      }
+    }
+    var result = stats(value);
+    wpmEl.textContent = Math.round(result.speed);
+    accEl.textContent = result.accuracy.toFixed(1) + "%%";
+    progressEl.textContent = Math.round((limit / TARGET.length) * 100) + "%%";
+    if (limit > 0 && spans[limit - 1] && spans[limit - 1].scrollIntoView) {
+      spans[limit - 1].scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function tick() {
+    var left = DURATION - elapsed();
+    timeEl.textContent = fmt(left);
+    var result = stats(inputEl.value);
+    wpmEl.textContent = Math.round(result.speed);
+    accEl.textContent = result.accuracy.toFixed(1) + "%%";
+    if (left <= 0) {
+      finish();
+    }
+  }
+
+  function finish() {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+    var result = stats(inputEl.value);
+    var seconds = Math.min(Math.max(elapsed(), 0.1), DURATION);
+    var finalSpeed = (result.correct / 5) / (seconds / 60);
+    resultText.textContent =
+      "速度 " + Math.round(finalSpeed) + " WPM · 正确率 " +
+      result.accuracy.toFixed(1) + "%% · 完成 " + result.limit + "/" +
+      TARGET.length + " 个字符";
+    resultEl.hidden = false;
+    inputEl.disabled = true;
+    restartBtn.focus();
+  }
+
+  function restart() {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+    started = false;
+    finished = false;
+    startTime = 0;
+    inputEl.disabled = false;
+    inputEl.value = "";
+    resultEl.hidden = true;
+    timeEl.textContent = fmt(DURATION);
+    paint("");
+    inputEl.focus();
+  }
+
+  function build() {
+    var index;
+    for (index = 0; index < TARGET.length; index += 1) {
+      var span = document.createElement("span");
+      var char = TARGET.charAt(index);
+      span.textContent = char === "\\n" ? "↵\\n" : char;
+      textEl.appendChild(span);
+      spans.push(span);
+    }
+    paint("");
+    timeEl.textContent = fmt(DURATION);
+  }
+
+  inputEl.addEventListener("input", function () {
+    if (finished) {
+      return;
+    }
+    var value = inputEl.value;
+    if (value.length > TARGET.length) {
+      value = value.slice(0, TARGET.length);
+      inputEl.value = value;
+    }
+    if (!started && value.length > 0) {
+      started = true;
+      startTime = Date.now();
+      timer = setInterval(tick, 200);
+    }
+    paint(value);
+    if (value.length >= TARGET.length) {
+      finish();
+    }
+  });
+
+  stageEl.addEventListener("click", function () {
+    if (!finished) {
+      inputEl.focus();
+    }
+  });
+
+  restartBtn.addEventListener("click", restart);
+  build();
+})();
+</script>
+</body>
+</html>
+""" % (
+        safe_title,
+        safe_title,
+        safe_name,
+        safe_description,
+        lesson.characters,
+        minutes,
+        target,
+        duration,
+    )

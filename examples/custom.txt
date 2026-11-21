@@ -1,0 +1,4 @@
+# 自定义打字文本，每行一段，# 开头为注释
+The library is a quiet place to read and think.
+Keep your voice down and push in your chair.
+Return the books before the end of the week.
